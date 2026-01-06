@@ -36,7 +36,10 @@ TELEGRAM_AVAILABLE = True
 # ============== KONFIGURATSIYA ==============
 app = Flask(__name__)
 app.secret_key = os.environ.get('SESSION_SECRET', 'dev-secret-key-change-in-production')
-DATABASE = 'crm.db'
+# Use an absolute path for the SQLite database so Gunicorn and other
+# process working directories don't change where the DB is created.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE = os.path.join(BASE_DIR, 'crm.db')
 
 # O'zbekiston vaqt zonasi (UTC+5)
 UZB_TIMEZONE = timezone(timedelta(hours=5))
@@ -123,6 +126,16 @@ def init_db():
     
     conn.commit()
     conn.close()
+
+# Ensure the database exists when the module is imported (e.g. when
+# running under Gunicorn). This creates tables if the DB file is
+# missing. It's safe to call multiple times because CREATE TABLE IF
+# NOT EXISTS is used.
+if not os.path.exists(DATABASE):
+    try:
+        init_db()
+    except Exception as e:
+        print(f"Failed to initialize DB on import: {e}")
 
 # ============== TELEGRAM FUNKSIYALARI ==============
 def send_telegram_message(chat_id, message):
