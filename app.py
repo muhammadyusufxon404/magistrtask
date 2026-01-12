@@ -37,7 +37,8 @@ TELEGRAM_AVAILABLE = True
 app = Flask(__name__)
 app.secret_key = os.environ.get('SESSION_SECRET', 'dev-secret-key-change-in-production')
 # Ensure reminder thread runs when app is served by WSGI servers (e.g. Gunicorn on Railway)
-@app.before_first_request
+# Use `before_serving` for newer Flask versions (replaces `before_first_request`)
+@app.before_serving
 def _start_reminder():
     start_reminder_thread()
 # Use an absolute path for the SQLite database so Gunicorn and other
