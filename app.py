@@ -65,9 +65,27 @@ def is_overdue(deadline):
         deadline = deadline.replace(tzinfo=UZB_TIMEZONE)
     return deadline < now
 
-# Telegram sozlamalari
+# Telegram sozlamalari: hozir DB orqali o'qiladi; .env fallback ham mavjud
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 BOSS_TELEGRAM_CHAT_ID = os.environ.get('BOSS_TELEGRAM_CHAT_ID', '')
+
+def get_setting(key):
+    """DB dan sozlamani o'qish"""
+    try:
+        conn = get_db()
+        row = conn.execute('SELECT value FROM settings WHERE key = ?', (key,)).fetchone()
+        conn.close()
+        return row['value'] if row else None
+    except Exception:
+        return None
+
+def set_setting(key, value):
+    """DB ga sozlamani yozish (yangi yoki yangilash)"""
+    conn = get_db()
+    # INSERT OR REPLACE ishlatamiz, shunda mavjud bo'lsa yangilanadi
+    conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
+    conn.commit()
+    conn.close()
 
 # SQLite datetime adapterlari (Python 3.12+ uchun)
 sqlite3.register_adapter(datetime, lambda d: d.isoformat())
@@ -117,12 +135,29 @@ def init_db():
         )
     ''')
     
+    # Settings jadvali: Telegram token va boss chat id kabi konfiguratsiyalar uchun
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    
     # Default boss foydalanuvchisini qo'shish
     hashed_password = hashlib.sha256('magistr'.encode()).hexdigest()
     cursor.execute('''
         INSERT OR IGNORE INTO users (username, password, role, full_name)
         VALUES (?, ?, ?, ?)
     ''', ('boss', hashed_password, 'boss', 'Bosh Direktor'))
+
+    # .env dagi Telegram sozlamalarini DB ga saqlash (agar mavjud bo'lsa)
+    try:
+        if TELEGRAM_BOT_TOKEN:
+            cursor.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ('TELEGRAM_BOT_TOKEN', TELEGRAM_BOT_TOKEN))
+        if BOSS_TELEGRAM_CHAT_ID:
+            cursor.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ('BOSS_TELEGRAM_CHAT_ID', BOSS_TELEGRAM_CHAT_ID))
+    except Exception as e:
+        print(f"Init settings error: {e}")
     
     conn.commit()
     conn.close()
@@ -140,11 +175,12 @@ if not os.path.exists(DATABASE):
 # ============== TELEGRAM FUNKSIYALARI ==============
 def send_telegram_message(chat_id, message):
     """Telegram orqali xabar yuborish"""
-    if not TELEGRAM_BOT_TOKEN or not chat_id or not TELEGRAM_AVAILABLE:
+    token = get_setting('TELEGRAM_BOT_TOKEN') or TELEGRAM_BOT_TOKEN
+    if not token or not chat_id or not TELEGRAM_AVAILABLE:
         return False
-    
+
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
         data = {
             'chat_id': chat_id,
             'text': message,
@@ -169,7 +205,8 @@ def notify_user_new_task(user_id, task_title, deadline=None):
 
 def notify_boss_task_completed(task_id):
     """Topshiriq bajarilganda bossga xabar"""
-    if not BOSS_TELEGRAM_CHAT_ID:
+    boss_id = get_setting('BOSS_TELEGRAM_CHAT_ID') or BOSS_TELEGRAM_CHAT_ID
+    if not boss_id:
         return
     
     conn = get_db()
@@ -187,7 +224,7 @@ def notify_boss_task_completed(task_id):
         message += f"👤 Bajardi: {task['xodim_name'] or 'Noma\'lum'}\n"
         if task['completion_note']:
             message += f"💬 Izoh: {task['completion_note']}"
-        send_telegram_message(BOSS_TELEGRAM_CHAT_ID, message)
+        send_telegram_message(boss_id, message)
 
 # ============== REMINDER TIZIMI ==============
 reminder_thread_started = False
@@ -776,6 +813,27 @@ CHANGE_PROFILE_TEMPLATE = '''
         <div class="form-group">
             <label>Hozirgi parol *</label>
             <input type="password" name="current_password" class="form-control" required placeholder="Tasdiqlash uchun hozirgi parol">
+        </div>
+        <button type="submit" class="btn btn-primary">💾 Saqlash</button>
+    </form>
+</div>
+'''
+
+TELEGRAM_SETTINGS_TEMPLATE = '''
+<div class="card">
+    <div class="card-header">
+        <h1>🤖 Telegram sozlamalari</h1>
+        <a href="{{ url_for('dashboard') }}" class="btn btn-secondary btn-sm">⬅ Orqaga</a>
+    </div>
+
+    <form method="POST">
+        <div class="form-group">
+            <label>Bot Token (TELEGRAM_BOT_TOKEN)</label>
+            <input type="text" name="telegram_token" class="form-control" value="{{ token }}" placeholder="Bot tokeni (masalan: 123456:ABC-DEF...)">
+        </div>
+        <div class="form-group">
+            <label>Boss Telegram Chat ID (BOSS_TELEGRAM_CHAT_ID)</label>
+            <input type="text" name="boss_chat_id" class="form-control" value="{{ boss_id }}" placeholder="Rahbarning chat id'si">
         </div>
         <button type="submit" class="btn btn-primary">💾 Saqlash</button>
     </form>
@@ -1576,6 +1634,21 @@ def change_profile():
         return redirect(url_for('dashboard'))
     
     return render_template_string(BASE_TEMPLATE, title='Profil o\'zgartirish', content=render_template_string(CHANGE_PROFILE_TEMPLATE))
+
+@app.route('/settings/telegram', methods=['GET', 'POST'])
+@boss_required
+def settings_telegram():
+    if request.method == 'POST':
+        token = request.form.get('telegram_token', '').strip()
+        boss_id = request.form.get('boss_chat_id', '').strip()
+        set_setting('TELEGRAM_BOT_TOKEN', token)
+        set_setting('BOSS_TELEGRAM_CHAT_ID', boss_id)
+        flash('Telegram sozlamalari saqlandi', 'success')
+        return redirect(url_for('settings_telegram'))
+
+    token = get_setting('TELEGRAM_BOT_TOKEN') or ''
+    boss_id = get_setting('BOSS_TELEGRAM_CHAT_ID') or ''
+    return render_template_string(BASE_TEMPLATE, title='Telegram sozlamalari', content=render_template_string(TELEGRAM_SETTINGS_TEMPLATE, token=token, boss_id=boss_id))
 
 @app.route('/export_csv')
 @boss_required
